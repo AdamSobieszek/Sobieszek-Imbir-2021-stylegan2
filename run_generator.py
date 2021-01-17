@@ -55,7 +55,7 @@ def generate_images(network_pkl, seeds, num, truncation_psi):
 def generate_video(network_pkl, sec, truncation_psi,
                            minibatch_size, output_dir,
                            direction_path, coeff, again, loop):
-    result_dir = Path(dnnlib.submit_config.run_dir_root)
+    result_dir = Path(output_dir)
     output_dir = Path(output_dir)
 
     if direction_path is not None:
