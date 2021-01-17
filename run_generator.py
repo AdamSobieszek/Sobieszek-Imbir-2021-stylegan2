@@ -5,18 +5,30 @@
 # https://nvlabs.github.io/stylegan2/license.html
 
 import argparse
+import json
 import numpy as np
-import PIL.Image
 import dnnlib
 import dnnlib.tflib as tflib
 import re
 import sys
-
 import pretrained_networks
+from tqdm import tqdm
 
-#----------------------------------------------------------------------------
+from pathlib import Path
+import io
+import base64
+from glob import glob
 
-def generate_images(network_pkl, seeds, truncation_psi):
+try:
+    import PIL.Image
+except:
+    try:
+        import Image
+    except:
+        import PIL
+
+
+def generate_images(network_pkl, seeds, num, truncation_psi):
     print('Loading networks from "%s"...' % network_pkl)
     _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
     noise_vars = [var for name, var in Gs.components.synthesis.vars.items() if name.startswith('noise')]
@@ -27,15 +39,261 @@ def generate_images(network_pkl, seeds, truncation_psi):
     if truncation_psi is not None:
         Gs_kwargs.truncation_psi = truncation_psi
 
-    for seed_idx, seed in enumerate(seeds):
-        print('Generating image for seed %d (%d/%d) ...' % (seed, seed_idx, len(seeds)))
+    if seeds is None:
+        actual_seeds = np.random.RandomState().randint(0, 2 ** 32, num)
+    else:
+        actual_seeds = seeds
+    for seed_idx, seed in enumerate(actual_seeds):
+        print('Generating image for seed %d (%d/%d) ...' % (seed, seed_idx, len(actual_seeds)))
         rnd = np.random.RandomState(seed)
         z = rnd.randn(1, *Gs.input_shape[1:]) # [minibatch, component]
         tflib.set_vars({var: rnd.randn(*var.shape.as_list()) for var in noise_vars}) # [height, width]
         images = Gs.run(z, None, **Gs_kwargs) # [minibatch, height, width, channel]
-        PIL.Image.fromarray(images[0], 'RGB').save(dnnlib.make_run_dir_path('seed%04d.png' % seed))
+        PIL.Image.fromarray(images[0], 'RGB').save(dnnlib.make_run_dir_path('img%05d.png' % seed_idx if seeds is None else 'seed%04d.png' % seed))
 
-#----------------------------------------------------------------------------
+
+def generate_video(network_pkl, sec, truncation_psi,
+                           minibatch_size, output_dir,
+                           direction_path, coeff, again, loop):
+    result_dir = Path(dnnlib.submit_config.run_dir_root)
+    output_dir = Path(output_dir)
+
+    if direction_path is not None:
+        direction = np.load(direction_path)
+
+    images_dir = result_dir / 'images'
+    dlatents_dir = result_dir / 'video_dlatent'
+    movieName = f'out/{coeff}'+'{:.4f}.mp4'.format(np.random.random())
+
+    n_frames = 25
+    num = int(sec*n_frames)
+    coeff_list = np.arange(-coeff,coeff+0.01,coeff/num*2)
+    imgs = []
+
+    images_dir.mkdir(exist_ok=True, parents=True)
+    dlatents_dir.mkdir(exist_ok=True, parents=True)
+    output_dir.mkdir(exist_ok=True)
+
+    print('Loading networks from "%s"...' % network_pkl)
+    _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
+    w_avg = Gs.get_var('dlatent_avg')
+
+    Gs_syn_kwargs = dnnlib.EasyDict()
+    Gs_syn_kwargs.output_transform = dict(func=tflib.convert_images_to_uint8,
+                                          nchw_to_nhwc=True)
+    Gs_syn_kwargs.randomize_noise = False
+    Gs_syn_kwargs.minibatch_size = minibatch_size
+
+    latents_from = 0
+    latents_to = 8
+    z = np.random.randn(*Gs.input_shape[1:]) if not again else np.array([np.load(dlatents_dir / '7.npy') for _ in range(18)])
+    all_z = np.array([z for _ in range(minibatch_size)])
+
+    for i in tqdm(range(num // minibatch_size)):
+        if not again:
+            all_w = Gs.components.mapping.run(all_z, None)
+            all_w = w_avg + (all_w - w_avg) * truncation_psi
+        else:
+            all_w=all_z
+
+        if direction_path is not None:
+            assert coeff is not None
+            pos_w = all_w.copy()
+
+            for j in range(len(all_w)):
+                pos_w[j][latents_from:latents_to] = \
+                    (pos_w[j] + coeff_list[i * minibatch_size + j] * direction)[latents_from:latents_to]
+
+            pos_images = Gs.components.synthesis.run(pos_w,
+                                                     **Gs_syn_kwargs)
+            for j in range(len(all_w)):
+                imgs.append(pos_images[j])
+                pos_image_pil = PIL.Image.fromarray(pos_images[j], 'RGB')
+                pos_image_pil.save(
+                    images_dir / '{}.png'.format(i * minibatch_size + j))
+
+        if not again and i==0:
+            np.save(dlatents_dir / (str(i * minibatch_size + j) + '.npy'), all_w[0][0])
+    if loop:
+        imgs += imgs[::-1]
+    import imageio
+    from skimage import img_as_ubyte
+
+    with imageio.get_writer(movieName, mode='I') as writer:
+        for image in tqdm(list(imgs)):
+            writer.append_data(img_as_ubyte(image))
+
+
+def generate_images_custom(network_pkl, num, truncation_psi,
+                           minibatch_size, output_dir,
+                           direction_path, coeff, noise_coeff, again):
+    result_dir = Path(dnnlib.submit_config.run_dir_root)
+    output_dir = Path(output_dir)
+
+    if direction_path is not None:
+        direction = np.load(direction_path)
+
+    images_dir = result_dir / 'images'
+    dlatents_dir = result_dir / 'dlatents'
+    output_tsv = output_dir / 'out.tsv'
+
+    images_dir.mkdir(exist_ok=True, parents=True)
+    dlatents_dir.mkdir(exist_ok=True, parents=True)
+    output_dir.mkdir(exist_ok=True)
+
+    print('Loading networks from "%s"...' % network_pkl)
+    _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
+    w_avg = Gs.get_var('dlatent_avg')
+
+    Gs_syn_kwargs = dnnlib.EasyDict()
+    Gs_syn_kwargs.output_transform = dict(func=tflib.convert_images_to_uint8,
+                                          nchw_to_nhwc=True)
+    Gs_syn_kwargs.randomize_noise = False
+    Gs_syn_kwargs.minibatch_size = minibatch_size
+
+    latents_from = 0
+    latents_to = 8
+
+    for i in tqdm(range(num // minibatch_size)):
+        all_z = np.random.randn(minibatch_size, *Gs.input_shape[1:])
+        all_w = Gs.components.mapping.run(all_z, None)
+        all_w = w_avg + (all_w - w_avg) * truncation_psi
+        if again:
+            for j, dlatent in enumerate(all_w):
+                previous_face=np.load(dlatents_dir / (str(i * minibatch_size + j) + 'ful.npy'))
+                all_w[j]=previous_face
+        save_memory=0
+        if noise_coeff is not None:
+            if noise_coeff>100.0:
+                save_memory=1
+            noise_w = all_w.copy()
+
+            for j in range(len(all_w)):
+                noise_intervals = [2, 3, 5, 8]
+                noise = np.random.randn(len(noise_intervals), 512) / 25
+                noise_vector = []
+                for k, interval in enumerate(noise_intervals):
+                    noises = [noise[k]] * interval
+                    noise_vector += noises
+                noise_vector = np.array(noise_vector)
+                np.save(dlatents_dir / (str(i * minibatch_size + j) + '_noise{:.1f}.npy'.format(noise_coeff%100)), noise_vector)
+
+                noise_w[j][latents_from:latents_to] = \
+                    (noise_w[j] + noise_coeff%100 * noise_vector)[latents_from:latents_to]
+
+            noise_images = Gs.components.synthesis.run(noise_w,
+                                                     **Gs_syn_kwargs)
+
+            for j in range(len(all_w)):
+                noise_image_pil = PIL.Image.fromarray(noise_images[j], 'RGB')
+                if save_memory:
+                    noise_image_pil.save(
+                        images_dir / '{}.png'.format(i * minibatch_size +
+                                                           j))
+                else:
+                    noise_image_pil.save(
+                        images_dir / 'ns_{}_{}.png'.format(i * minibatch_size +
+                                                           j, noise_coeff%100))
+
+        if direction_path is not None:
+            assert coeff is not None
+            pos_w = all_w.copy()
+            neg_w = all_w.copy()
+
+            for j in range(len(all_w)):
+                pos_w[j][latents_from:latents_to] = \
+                    (pos_w[j] + coeff * direction)[latents_from:latents_to]
+                neg_w[j][latents_from:latents_to] = \
+                    (neg_w[j] - coeff * direction)[latents_from:latents_to]
+
+            pos_images = Gs.components.synthesis.run(pos_w,
+                                                     **Gs_syn_kwargs)
+            neg_images = Gs.components.synthesis.run(neg_w,
+                                                     **Gs_syn_kwargs)
+
+            for j in range(len(all_w)):
+                pos_image_pil = PIL.Image.fromarray(pos_images[j], 'RGB')
+                pos_image_pil.save(
+                    images_dir / '{}a{}.png'.format(i * minibatch_size +
+                                                       j, coeff))
+
+                neg_image_pil = PIL.Image.fromarray(neg_images[j], 'RGB')
+                neg_image_pil.save(
+                    images_dir / '{}c-{}.png'.format(i * minibatch_size +
+                                                       j, coeff))
+
+        all_images = Gs.components.synthesis.run(all_w, **Gs_syn_kwargs)
+
+        for j, (dlatent, image) in enumerate(zip(all_w, all_images)):
+            if not save_memory:
+                image_pil = PIL.Image.fromarray(image, 'RGB')
+                image_pil.save(images_dir / (str(i * minibatch_size + j) + 'b00.png'))
+            if not again:
+                np.save(dlatents_dir / (str(i * minibatch_size + j) + '.npy'), dlatent[0])
+                np.save(dlatents_dir / (str(i * minibatch_size + j) + 'ful.npy'), dlatent)
+
+
+def apply_vector_on_backprop(network_pkl, dlatents_files_pattern,
+                             direction_path, transformation):
+    print('Loading networks from "%s"...' % network_pkl)
+    _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
+    dlatent_steps = [5, 10, 50, 100, 200, 400, 600, 800, 1000]
+
+    Gs_kwargs = dnnlib.EasyDict()
+    Gs_kwargs.output_transform = dict(func=tflib.convert_images_to_uint8,
+                                      nchw_to_nhwc=True)
+    Gs_kwargs.randomize_noise = False
+
+    if transformation == 'gender':
+        with open(direction_path) as f:
+            delta = np.array([float(i) for i in f.readlines()[0].split()])
+            if len(delta) == 512:
+                delta = np.tile(delta, [18, 1])
+            else:
+                raise Exception('Wrong direction vector')
+    elif transformation == 'age':
+        with open(direction_path) as f:
+            age = json.loads(f.read().replace("'", '"'))
+        delta = np.array(age['18-24']) - np.array(age['45-54'])  # 55-130
+        if len(delta) == 512:
+            delta = np.tile(delta, [18, 1])
+        else:
+            raise Exception('Wrong direction vector')
+    else:
+        raise ValueError('Wrong transformation value')
+
+    dlatents_files = glob(dlatents_files_pattern + '*step.txt')
+    for file in tqdm(dlatents_files):
+        person_name = file.split('/')[-1].split('image')[-1].split('-')[0]
+        with open(file) as f:
+            for step, line in zip(dlatent_steps, f.readlines()):
+                if step in [200, 1000]:  # [10, 50, 100, 200, 1000]:
+                    dlatent = np.array([float(i) for i in line.split()])
+                    if len(dlatent) == 512:
+                        dlatent = np.tile(dlatent, [18, 1])
+                    elif len(dlatent) == 512 * 18:
+                        dlatent = np.reshape(dlatent, [18, 512])
+                    else:
+                        raise Exception('Wrong person vector')
+
+                    dlatents_person = []
+                    fnames = []
+
+                    alphas = [-1.0 + 0.25 * i for i in range(9) if i not in [
+                        3, 5]]
+                    for alpha in alphas:
+                        dlatents_person.append(dlatent + alpha * delta)
+                        fnames.append('translation_%s_%s_%s.png' % (person_name,
+                                                                    step,
+                                                                    alpha))
+
+                    images = Gs.components.synthesis.run(np.array(dlatents_person),
+                                                         **Gs_kwargs)
+
+                    for fname, image in zip(fnames, images):
+                        PIL.Image.fromarray(image, 'RGB').save(
+                            dnnlib.make_run_dir_path(fname))
+
 
 def style_mixing_example(network_pkl, row_seeds, col_seeds, truncation_psi, col_styles, minibatch_size=4):
     print('Loading networks from "%s"...' % network_pkl)
@@ -93,7 +351,7 @@ def _parse_num_range(s):
     range_re = re.compile(r'^(\d+)-(\d+)$')
     m = range_re.match(s)
     if m:
-        return list(range(int(m.group(1)), int(m.group(2))+1))
+        return range(int(m.group(1)), int(m.group(2))+1)
     vals = s.split(',')
     return [int(x) for x in vals]
 
@@ -129,9 +387,69 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
 
     parser_generate_images = subparsers.add_parser('generate-images', help='Generate images')
     parser_generate_images.add_argument('--network', help='Network pickle filename', dest='network_pkl', required=True)
-    parser_generate_images.add_argument('--seeds', type=_parse_num_range, help='List of random seeds', required=True)
+    parser_generate_images.add_argument('--seeds', type=_parse_num_range, help='List of random seeds', default=None)
+    parser_generate_images.add_argument('--num', type=int, help='Num images to generate', default=16)
     parser_generate_images.add_argument('--truncation-psi', type=float, help='Truncation psi (default: %(default)s)', default=0.5)
     parser_generate_images.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)', default='results', metavar='DIR')
+
+
+    parser_generate_video  = subparsers.add_parser('generate-video', help='Generate videos')
+    parser_generate_video.add_argument('--network', help='Network pickle filename', dest='network_pkl', required=True)
+    parser_generate_video.add_argument('--sec', type=float, help='Seconds of video to generate', default=1)
+    parser_generate_video.add_argument('--truncation-psi', type=float, help='Truncation psi (default: %(default)s)', default=0.5)
+    parser_generate_video.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)', default='results', metavar='DIR')
+    parser_generate_video.add_argument('--minibatch_size', type=int, help='Minibatch size',default=8)
+    parser_generate_video.add_argument('--output_dir', help='Root directory for output tsv',
+                                               default='outputs')
+    parser_generate_video.add_argument('--direction_path', default=None)
+    parser_generate_video.add_argument('--coeff', dest='coeff', type=float)
+    parser_generate_video.add_argument('--again', help='Run again with different coeff? (default: %(default)s)', default=False)
+    parser_generate_video.add_argument('--loop', help='Run in loop? (default: %(default)s)', default=False)
+
+
+
+    parser_generate_images_custom = subparsers.add_parser(
+        'generate-images-custom', help='Generate images with dlatents')
+    parser_generate_images_custom.add_argument('--network',
+                                        help='Network pickle filename',
+                                        dest='network_pkl', required=True)
+    parser_generate_images_custom.add_argument('--num', type=int,
+                                        help='Num images to generate',
+                                        default=16)
+    parser_generate_images_custom.add_argument('--truncation-psi', type=float,
+                                        help='Truncation psi (default: %(default)s)',
+                                        default=0.5)
+    parser_generate_images_custom.add_argument('--result-dir',
+                                        help='Root directory for run results (default: %(default)s)',
+                                        default='results', metavar='DIR')
+    parser_generate_images_custom.add_argument('--minibatch_size', type=int,
+                                        help='Minibatch size',
+                                        default=8)
+    parser_generate_images_custom.add_argument('--output_dir',
+                                               help='Root directory for '
+                                                    'output tsv',
+                                               default='outputs')
+    parser_generate_images_custom.add_argument('--direction_path', default=None)
+    parser_generate_images_custom.add_argument('--coeff', dest='coeff',
+                                               type=float)
+    parser_generate_images_custom.add_argument('--noise_coeff', dest='noise_coeff',
+                                               type=float)
+    parser_generate_images_custom.add_argument('--again', help='Run again with different coeff? (default: %(default)s)', default=False)
+
+
+    parser_apply_vector_on_backprop = subparsers.add_parser(
+        'apply-vector-on-backprop', help='Transform image with direction')
+    parser_apply_vector_on_backprop.add_argument('--network',
+                                               help='Network pickle filename',
+                                               dest='network_pkl',
+                                               required=True)
+    parser_apply_vector_on_backprop.add_argument('--dlatents_files_pattern',
+                                                 default=None)
+    parser_apply_vector_on_backprop.add_argument('--direction_path', default=None)
+    parser_apply_vector_on_backprop.add_argument('--transformation',
+                                                 default=None)
+    parser_apply_vector_on_backprop.add_argument('--result-dir',
+                                                 help='Root directory for run results (default: %(default)s)', default='results', metavar='DIR')
 
     parser_style_mixing_example = subparsers.add_parser('style-mixing-example', help='Generate style mixing video')
     parser_style_mixing_example.add_argument('--network', help='Network pickle filename', dest='network_pkl', required=True)
@@ -146,7 +464,7 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
     subcmd = kwargs.pop('command')
 
     if subcmd is None:
-        print ('Error: missing subcommand.  Re-run with --help for usage.')
+        print('Error: missing subcommand.  Re-run with --help for usage.')
         sys.exit(1)
 
     sc = dnnlib.SubmitConfig()
@@ -158,13 +476,13 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
 
     func_name_map = {
         'generate-images': 'run_generator.generate_images',
-        'style-mixing-example': 'run_generator.style_mixing_example'
+        'generate-images-custom': 'run_generator.generate_images_custom',
+        'apply-vector-on-backprop': 'run_generator.apply_vector_on_backprop',
+        'style-mixing-example': 'run_generator.style_mixing_example',
+        'generate-video': 'run_generator.generate_video'
     }
     dnnlib.submit_run(sc, func_name_map[subcmd], **kwargs)
 
-#----------------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
-
-#----------------------------------------------------------------------------
