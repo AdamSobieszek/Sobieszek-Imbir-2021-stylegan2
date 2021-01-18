@@ -53,10 +53,8 @@ def generate_images(network_pkl, seeds, num, truncation_psi):
 
 
 def generate_video(network_pkl, sec, truncation_psi,
-                           minibatch_size, output_dir,
                            direction_path, coeff, again, loop):
-    result_dir = Path(output_dir)
-    output_dir = Path(output_dir)
+    result_dir = Path(dnnlib.submit_config.run_dir_root)
 
     if direction_path is not None:
         direction = np.load(direction_path)
@@ -72,7 +70,6 @@ def generate_video(network_pkl, sec, truncation_psi,
 
     images_dir.mkdir(exist_ok=True, parents=True)
     dlatents_dir.mkdir(exist_ok=True, parents=True)
-    output_dir.mkdir(exist_ok=True)
 
     print('Loading networks from "%s"...' % network_pkl)
     _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
@@ -124,22 +121,19 @@ def generate_video(network_pkl, sec, truncation_psi,
             writer.append_data(img_as_ubyte(image))
 
 
-def generate_images_custom(network_pkl, num, truncation_psi,
-                           minibatch_size, output_dir,
-                           direction_path, coeff, noise_coeff, again):
+def generate_manipulated_images(network_pkl, num, truncation_psi,
+                                minibatch_size,
+                                direction_path, coeff, repeat_generation):
     result_dir = Path(dnnlib.submit_config.run_dir_root)
-    output_dir = Path(output_dir)
 
     if direction_path is not None:
         direction = np.load(direction_path)
 
     images_dir = result_dir / 'images'
     dlatents_dir = result_dir / 'dlatents'
-    output_tsv = output_dir / 'out.tsv'
 
     images_dir.mkdir(exist_ok=True, parents=True)
     dlatents_dir.mkdir(exist_ok=True, parents=True)
-    output_dir.mkdir(exist_ok=True)
 
     print('Loading networks from "%s"...' % network_pkl)
     _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
@@ -158,42 +152,11 @@ def generate_images_custom(network_pkl, num, truncation_psi,
         all_z = np.random.randn(minibatch_size, *Gs.input_shape[1:])
         all_w = Gs.components.mapping.run(all_z, None)
         all_w = w_avg + (all_w - w_avg) * truncation_psi
-        if again:
+        if repeat_generation:
             for j, dlatent in enumerate(all_w):
                 previous_face=np.load(dlatents_dir / (str(i * minibatch_size + j) + 'ful.npy'))
                 all_w[j]=previous_face
         save_memory=0
-        if noise_coeff is not None:
-            if noise_coeff>100.0:
-                save_memory=1
-            noise_w = all_w.copy()
-
-            for j in range(len(all_w)):
-                noise_intervals = [2, 3, 5, 8]
-                noise = np.random.randn(len(noise_intervals), 512) / 25
-                noise_vector = []
-                for k, interval in enumerate(noise_intervals):
-                    noises = [noise[k]] * interval
-                    noise_vector += noises
-                noise_vector = np.array(noise_vector)
-                np.save(dlatents_dir / (str(i * minibatch_size + j) + '_noise{:.1f}.npy'.format(noise_coeff%100)), noise_vector)
-
-                noise_w[j][latents_from:latents_to] = \
-                    (noise_w[j] + noise_coeff%100 * noise_vector)[latents_from:latents_to]
-
-            noise_images = Gs.components.synthesis.run(noise_w,
-                                                     **Gs_syn_kwargs)
-
-            for j in range(len(all_w)):
-                noise_image_pil = PIL.Image.fromarray(noise_images[j], 'RGB')
-                if save_memory:
-                    noise_image_pil.save(
-                        images_dir / '{}.png'.format(i * minibatch_size +
-                                                           j))
-                else:
-                    noise_image_pil.save(
-                        images_dir / 'ns_{}_{}.png'.format(i * minibatch_size +
-                                                           j, noise_coeff%100))
 
         if direction_path is not None:
             assert coeff is not None
@@ -214,12 +177,12 @@ def generate_images_custom(network_pkl, num, truncation_psi,
             for j in range(len(all_w)):
                 pos_image_pil = PIL.Image.fromarray(pos_images[j], 'RGB')
                 pos_image_pil.save(
-                    images_dir / '{}a{}.png'.format(i * minibatch_size +
+                    images_dir / '{}pos{}.png'.format(i * minibatch_size +
                                                        j, coeff))
 
                 neg_image_pil = PIL.Image.fromarray(neg_images[j], 'RGB')
                 neg_image_pil.save(
-                    images_dir / '{}c-{}.png'.format(i * minibatch_size +
+                    images_dir / '{}neg{}.png'.format(i * minibatch_size +
                                                        j, coeff))
 
         all_images = Gs.components.synthesis.run(all_w, **Gs_syn_kwargs)
@@ -227,10 +190,85 @@ def generate_images_custom(network_pkl, num, truncation_psi,
         for j, (dlatent, image) in enumerate(zip(all_w, all_images)):
             if not save_memory:
                 image_pil = PIL.Image.fromarray(image, 'RGB')
-                image_pil.save(images_dir / (str(i * minibatch_size + j) + 'b00.png'))
-            if not again:
+                image_pil.save(images_dir / (str(i * minibatch_size + j) + 'neu.png'))
+            if not repeat_generation:
                 np.save(dlatents_dir / (str(i * minibatch_size + j) + '.npy'), dlatent[0])
-                np.save(dlatents_dir / (str(i * minibatch_size + j) + 'ful.npy'), dlatent)
+
+
+
+def generate_images_custom(network_pkl, num, truncation_psi,
+                           minibatch_size,
+                           direction_path, coeff, repeat_generation):
+    result_dir = Path(dnnlib.submit_config.run_dir_root)
+
+    if direction_path is not None:
+        direction = np.load(direction_path)
+
+    images_dir = result_dir / 'images'
+    dlatents_dir = result_dir / 'dlatents'
+
+
+    images_dir.mkdir(exist_ok=True, parents=True)
+    dlatents_dir.mkdir(exist_ok=True, parents=True)
+
+    print('Loading networks from "%s"...' % network_pkl)
+    _G, _D, Gs = pretrained_networks.load_networks(network_pkl)
+    w_avg = Gs.get_var('dlatent_avg')
+
+    Gs_syn_kwargs = dnnlib.EasyDict()
+    Gs_syn_kwargs.output_transform = dict(func=tflib.convert_images_to_uint8,
+                                          nchw_to_nhwc=True)
+    Gs_syn_kwargs.randomize_noise = False
+    Gs_syn_kwargs.minibatch_size = minibatch_size
+
+    latents_from = 0
+    latents_to = 8
+
+    for i in tqdm(range(num // minibatch_size)):
+        all_z = np.random.randn(minibatch_size, *Gs.input_shape[1:])
+        all_w = Gs.components.mapping.run(all_z, None)
+        all_w = w_avg + (all_w - w_avg) * truncation_psi
+        if repeat_generation:
+            for j, dlatent in enumerate(all_w):
+                previous_face=np.load(dlatents_dir / (str(i * minibatch_size + j) + 'ful.npy'))
+                all_w[j]=previous_face
+        save_memory=0
+
+        if direction_path is not None:
+            assert coeff is not None
+            pos_w = all_w.copy()
+            neg_w = all_w.copy()
+
+            for j in range(len(all_w)):
+                pos_w[j][latents_from:latents_to] = \
+                    (pos_w[j] + coeff * direction)[latents_from:latents_to]
+                neg_w[j][latents_from:latents_to] = \
+                    (neg_w[j] - coeff * direction)[latents_from:latents_to]
+
+            pos_images = Gs.components.synthesis.run(pos_w,
+                                                     **Gs_syn_kwargs)
+            neg_images = Gs.components.synthesis.run(neg_w,
+                                                     **Gs_syn_kwargs)
+
+            for j in range(len(all_w)):
+                pos_image_pil = PIL.Image.fromarray(pos_images[j], 'RGB')
+                pos_image_pil.save(
+                    images_dir / '{}pos{}.png'.format(i * minibatch_size +
+                                                       j, coeff))
+
+                neg_image_pil = PIL.Image.fromarray(neg_images[j], 'RGB')
+                neg_image_pil.save(
+                    images_dir / '{}neg{}.png'.format(i * minibatch_size +
+                                                       j, coeff))
+
+        all_images = Gs.components.synthesis.run(all_w, **Gs_syn_kwargs)
+
+        for j, (dlatent, image) in enumerate(zip(all_w, all_images)):
+            if not save_memory:
+                image_pil = PIL.Image.fromarray(image, 'RGB')
+                image_pil.save(images_dir / (str(i * minibatch_size + j) + 'neu.png'))
+            if not repeat_generation:
+                np.save(dlatents_dir / (str(i * minibatch_size + j) + '.npy'), dlatent[0])
 
 
 def apply_vector_on_backprop(network_pkl, dlatents_files_pattern,
@@ -399,42 +437,38 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
     parser_generate_video.add_argument('--truncation-psi', type=float, help='Truncation psi (default: %(default)s)', default=0.5)
     parser_generate_video.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)', default='results', metavar='DIR')
     parser_generate_video.add_argument('--minibatch_size', type=int, help='Minibatch size',default=8)
-    parser_generate_video.add_argument('--output_dir', help='Root directory for output tsv',
-                                               default='outputs')
     parser_generate_video.add_argument('--direction_path', default=None)
     parser_generate_video.add_argument('--coeff', dest='coeff', type=float)
     parser_generate_video.add_argument('--again', help='Run again with different coeff? (default: %(default)s)', default=False)
     parser_generate_video.add_argument('--loop', help='Run in loop? (default: %(default)s)', default=False)
 
 
+    parser_generate_manipulated_images = subparsers.add_parser(
+        'generate-manipulated-images', help='Generate images with dlatents')
+    parser_generate_manipulated_images.add_argument('--network', help='Network pickle filename',
+                                               dest='network_pkl', required=True)
+    parser_generate_manipulated_images.add_argument('--num', type=int, help='Num images to generate', default=16)
+    parser_generate_manipulated_images.add_argument('--truncation-psi', type=float,
+                                               help='Truncation psi (default: %(default)s)', default=0.5)
+    parser_generate_manipulated_images.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)',
+                                               default='results', metavar='DIR')
+    parser_generate_manipulated_images.add_argument('--minibatch_size', type=int, help='Minibatch size', default=8)
+    parser_generate_manipulated_images.add_argument('--direction_path', default=None)
+    parser_generate_manipulated_images.add_argument('--coeff', dest='coeff', type=float)
+    parser_generate_manipulated_images.add_argument('--repeat_generation', help='Run again with different coeff? (default: %(default)s)', default=False)
+
 
     parser_generate_images_custom = subparsers.add_parser(
         'generate-images-custom', help='Generate images with dlatents')
-    parser_generate_images_custom.add_argument('--network',
-                                        help='Network pickle filename',
-                                        dest='network_pkl', required=True)
-    parser_generate_images_custom.add_argument('--num', type=int,
-                                        help='Num images to generate',
-                                        default=16)
-    parser_generate_images_custom.add_argument('--truncation-psi', type=float,
-                                        help='Truncation psi (default: %(default)s)',
-                                        default=0.5)
-    parser_generate_images_custom.add_argument('--result-dir',
-                                        help='Root directory for run results (default: %(default)s)',
+    parser_generate_images_custom.add_argument('--network', help='Network pickle filename', dest='network_pkl', required=True)
+    parser_generate_images_custom.add_argument('--num', type=int, help='Num images to generate', default=16)
+    parser_generate_images_custom.add_argument('--truncation-psi', type=float, help='Truncation psi (default: %(default)s)', default=0.5)
+    parser_generate_images_custom.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)',
                                         default='results', metavar='DIR')
-    parser_generate_images_custom.add_argument('--minibatch_size', type=int,
-                                        help='Minibatch size',
-                                        default=8)
-    parser_generate_images_custom.add_argument('--output_dir',
-                                               help='Root directory for '
-                                                    'output tsv',
-                                               default='outputs')
+    parser_generate_images_custom.add_argument('--minibatch_size', type=int, help='Minibatch size', default=8)
     parser_generate_images_custom.add_argument('--direction_path', default=None)
-    parser_generate_images_custom.add_argument('--coeff', dest='coeff',
-                                               type=float)
-    parser_generate_images_custom.add_argument('--noise_coeff', dest='noise_coeff',
-                                               type=float)
-    parser_generate_images_custom.add_argument('--again', help='Run again with different coeff? (default: %(default)s)', default=False)
+    parser_generate_images_custom.add_argument('--coeff', dest='coeff', type=float)
+    parser_generate_images_custom.add_argument('--repeat_generation', help='Run again with different coeff? (default: %(default)s)', default=False)
 
 
     parser_apply_vector_on_backprop = subparsers.add_parser(
@@ -479,7 +513,8 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
         'generate-images-custom': 'run_generator.generate_images_custom',
         'apply-vector-on-backprop': 'run_generator.apply_vector_on_backprop',
         'style-mixing-example': 'run_generator.style_mixing_example',
-        'generate-video': 'run_generator.generate_video'
+        'generate-video': 'run_generator.generate_video',
+        'generate-manipulated-images':'generate_manipulated_images'
     }
     dnnlib.submit_run(sc, func_name_map[subcmd], **kwargs)
 
