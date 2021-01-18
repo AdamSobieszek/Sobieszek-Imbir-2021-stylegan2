@@ -1,4 +1,4 @@
-## StyleGAN2 &mdash; Official TensorFlow Implementation
+## StyleGAN2 for Social Science
 
 ![Teaser image](./docs/stylegan2-teaser-1024x256.png)
 
