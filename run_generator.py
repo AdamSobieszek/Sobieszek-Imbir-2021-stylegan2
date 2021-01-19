@@ -197,12 +197,8 @@ def generate_manipulated_images(network_pkl, num, truncation_psi,
 
 
 def generate_images_custom(network_pkl, num, truncation_psi,
-                           minibatch_size,
-                           direction_path, coeff, repeat_generation):
+                           minibatch_size, repeat_generation):
     result_dir = Path(dnnlib.submit_config.run_dir_root)
-
-    if direction_path is not None:
-        direction = np.load(direction_path)
 
     images_dir = result_dir / 'images'
     dlatents_dir = result_dir / 'dlatents'
@@ -234,39 +230,12 @@ def generate_images_custom(network_pkl, num, truncation_psi,
                 all_w[j]=previous_face
         save_memory=0
 
-        if direction_path is not None:
-            assert coeff is not None
-            pos_w = all_w.copy()
-            neg_w = all_w.copy()
-
-            for j in range(len(all_w)):
-                pos_w[j][latents_from:latents_to] = \
-                    (pos_w[j] + coeff * direction)[latents_from:latents_to]
-                neg_w[j][latents_from:latents_to] = \
-                    (neg_w[j] - coeff * direction)[latents_from:latents_to]
-
-            pos_images = Gs.components.synthesis.run(pos_w,
-                                                     **Gs_syn_kwargs)
-            neg_images = Gs.components.synthesis.run(neg_w,
-                                                     **Gs_syn_kwargs)
-
-            for j in range(len(all_w)):
-                pos_image_pil = PIL.Image.fromarray(pos_images[j], 'RGB')
-                pos_image_pil.save(
-                    images_dir / '{}pos{}.png'.format(i * minibatch_size +
-                                                       j, coeff))
-
-                neg_image_pil = PIL.Image.fromarray(neg_images[j], 'RGB')
-                neg_image_pil.save(
-                    images_dir / '{}neg{}.png'.format(i * minibatch_size +
-                                                       j, coeff))
-
         all_images = Gs.components.synthesis.run(all_w, **Gs_syn_kwargs)
 
         for j, (dlatent, image) in enumerate(zip(all_w, all_images)):
             if not save_memory:
                 image_pil = PIL.Image.fromarray(image, 'RGB')
-                image_pil.save(images_dir / (str(i * minibatch_size + j) + 'neu.png'))
+                image_pil.save(images_dir / (str(i * minibatch_size + j) + '.png'))
             if not repeat_generation:
                 np.save(dlatents_dir / (str(i * minibatch_size + j) + '.npy'), dlatent[0])
 
@@ -444,7 +413,7 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
 
 
     parser_generate_manipulated_images = subparsers.add_parser(
-        'generate-manipulated-images', help='Generate images with dlatents')
+        'generate-manipulated-images', help='Generate images manipulated by coefficient coeff, saved with dlatents')
     parser_generate_manipulated_images.add_argument('--network', help='Network pickle filename',
                                                dest='network_pkl', required=True)
     parser_generate_manipulated_images.add_argument('--num', type=int, help='Num images to generate', default=16)
@@ -466,8 +435,6 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
     parser_generate_images_custom.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)',
                                         default='results', metavar='DIR')
     parser_generate_images_custom.add_argument('--minibatch_size', type=int, help='Minibatch size', default=8)
-    parser_generate_images_custom.add_argument('--direction_path', default=None)
-    parser_generate_images_custom.add_argument('--coeff', dest='coeff', type=float)
     parser_generate_images_custom.add_argument('--repeat_generation', help='Run again with different coeff? (default: %(default)s)', default=False)
 
 
