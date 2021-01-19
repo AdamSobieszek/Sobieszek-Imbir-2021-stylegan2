@@ -154,7 +154,7 @@ def generate_manipulated_images(network_pkl, num, truncation_psi,
         all_w = w_avg + (all_w - w_avg) * truncation_psi
         if repeat_generation:
             for j, dlatent in enumerate(all_w):
-                previous_face=np.load(dlatents_dir / (str(i * minibatch_size + j) + 'ful.npy'))
+                previous_face=np.tile(np.load(dlatents_dir / (str(i * minibatch_size + j) + '.npy')),(18,1))
                 all_w[j]=previous_face
         save_memory=0
 
@@ -226,7 +226,7 @@ def generate_images_custom(network_pkl, num, truncation_psi,
         all_w = w_avg + (all_w - w_avg) * truncation_psi
         if repeat_generation:
             for j, dlatent in enumerate(all_w):
-                previous_face=np.load(dlatents_dir / (str(i * minibatch_size + j) + 'ful.npy'))
+                previous_face=np.tile(np.load(dlatents_dir / (str(i * minibatch_size + j) + '.npy')),(18,1))
                 all_w[j]=previous_face
         save_memory=0
 
