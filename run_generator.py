@@ -481,7 +481,7 @@ Run 'python %(prog)s <subcommand> --help' for subcommand help.''',
         'apply-vector-on-backprop': 'run_generator.apply_vector_on_backprop',
         'style-mixing-example': 'run_generator.style_mixing_example',
         'generate-video': 'run_generator.generate_video',
-        'generate-manipulated-images':'generate_manipulated_images'
+        'generate-manipulated-images':'run_generator.generate_manipulated_images'
     }
     dnnlib.submit_run(sc, func_name_map[subcmd], **kwargs)
 
